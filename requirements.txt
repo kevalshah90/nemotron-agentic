@@ -1,0 +1,4 @@
+requests
+numpy
+kubernetes
+python-dotenv
