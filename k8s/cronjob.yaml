@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: nemotron-advisor
+  namespace: monitoring
+spec:
+  schedule: "*/5 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: nemotron-advisor
+          containers:
+            - name: advisor
+              image: kevalshah90/nemotron-advisor:latest
+              args:
+                - "--prometheus-url"
+                - "http://prometheus-server.monitoring.svc:9090"
+                - "--nim-url"
+                - "http://nemotron-nim.nim.svc:8000"
+              env:
+                - name: NVIDIA_API_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: nemotron-secrets
+                      key: NVIDIA_API_KEY
+          restartPolicy: OnFailure

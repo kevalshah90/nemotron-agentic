@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nemotron-nim
+  namespace: nim
+  labels:
+    app: nemotron-nim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nemotron-nim
+  template:
+    metadata:
+      labels:
+        app: nemotron-nim
+    spec:
+      imagePullSecrets:
+        - name: ngc-secret
+      containers:
+        - name: nemotron-nim
+          image: nvcr.io/nim/nvidia/llama-3.3-nemotron-super-49b-v1.5:latest
+          ports:
+            - containerPort: 8000
+          env:
+            - name: NGC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: ngc-api-key
+                  key: NGC_API_KEY
+          resources:
+            limits:
+              nvidia.com/gpu: 1
+          volumeMounts:
+            - name: nim-cache
+              mountPath: /opt/nim/.cache
+            - name: dshm
+              mountPath: /dev/shm
+          readinessProbe:
+            httpGet:
+              path: /v1/health/ready
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /v1/health/live
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 15
+      volumes:
+        - name: nim-cache
+          persistentVolumeClaim:
+            claimName: nim-cache-pvc
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
