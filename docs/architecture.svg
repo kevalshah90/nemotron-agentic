@@ -1,0 +1,181 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 880 760" role="img" aria-labelledby="title desc" font-family="ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif">
+  <title id="title">K8s Nemotron Advisor — System Architecture</title>
+  <desc id="desc">Five-tier architecture: Client (Browser UI, CLI) talks to a FastAPI server, which spawns a worker that runs the Nemotron ReAct loop. The loop calls the NVIDIA hosted API for reasoning and tool_calls, dispatches tool calls through a registry to backend agents (Metrics, K8s API, Anomaly, propose_action, finish). The propose_action tool feeds an approval queue gated by a human operator. Backends reach external services: Prometheus and the Kubernetes API.</desc>
+
+  <style><![CDATA[
+    .box       { fill: #ffffff; stroke: #6b7280; stroke-width: 1.5; }
+    .box-soft  { fill: #f9fafb; stroke: #d1d5db; stroke-width: 1; }
+    .ext       { fill: #f3f4f6; stroke: #6b7280; stroke-width: 1.5; stroke-dasharray: 4 3; }
+    .safety    { fill: #fef3c7; stroke: #d97706; stroke-width: 2; }
+    .title     { fill: #111827; font-size: 18px; font-weight: 700; }
+    .subtitle  { fill: #6b7280; font-size: 12px; }
+    .label     { fill: #111827; font-size: 13px; font-weight: 600; }
+    .sub       { fill: #6b7280; font-size: 11px; }
+    .tier      { fill: #9ca3af; font-size: 10.5px; font-weight: 700; letter-spacing: 1.6px; text-transform: uppercase; }
+    .safety-t  { fill: #92400e; font-size: 11px; font-weight: 600; }
+    .arrow     { stroke: #6b7280; stroke-width: 1.5; fill: none; }
+    .arrow-bi  { stroke: #2563eb; stroke-width: 1.8; fill: none; }
+    .arrow-d   { stroke: #9ca3af; stroke-width: 1.2; stroke-dasharray: 4 3; fill: none; }
+    .legend-t  { fill: #6b7280; font-size: 11px; }
+
+    @media (prefers-color-scheme: dark) {
+      .box       { fill: #1f2937; stroke: #9ca3af; }
+      .box-soft  { fill: #111827; stroke: #4b5563; }
+      .ext       { fill: #0f172a; stroke: #9ca3af; }
+      .safety    { fill: #422006; stroke: #fbbf24; }
+      .title     { fill: #f3f4f6; }
+      .subtitle  { fill: #9ca3af; }
+      .label     { fill: #f3f4f6; }
+      .sub       { fill: #9ca3af; }
+      .tier      { fill: #6b7280; }
+      .safety-t  { fill: #fde68a; }
+      .arrow     { stroke: #9ca3af; }
+      .arrow-bi  { stroke: #60a5fa; }
+      .arrow-d   { stroke: #6b7280; }
+      .legend-t  { fill: #9ca3af; }
+    }
+  ]]></style>
+
+  <defs>
+    <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#6b7280"/>
+    </marker>
+    <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#2563eb"/>
+    </marker>
+  </defs>
+
+  <!-- Title -->
+  <text x="440" y="32" text-anchor="middle" class="title">K8s Nemotron Advisor — System Architecture</text>
+  <text x="440" y="52" text-anchor="middle" class="subtitle">agentic loop · tool-use · human-approved actions</text>
+
+  <!-- ───────────── TIER 1: CLIENT ───────────── -->
+  <text x="40" y="100" class="tier">Client</text>
+
+  <rect x="200" y="82" width="200" height="56" rx="8" class="box"/>
+  <text x="300" y="106" text-anchor="middle" class="label">Browser UI</text>
+  <text x="300" y="124" text-anchor="middle" class="sub">EventSource · Approve / Reject</text>
+
+  <rect x="480" y="82" width="200" height="56" rx="8" class="box"/>
+  <text x="580" y="106" text-anchor="middle" class="label">CLI</text>
+  <text x="580" y="124" text-anchor="middle" class="sub">terminal trace · y/N approval</text>
+
+  <!-- arrows down to server -->
+  <path d="M300,138 L300,168" class="arrow" marker-end="url(#ah)"/>
+  <path d="M580,138 L580,168" class="arrow" marker-end="url(#ah)"/>
+
+  <!-- ───────────── TIER 2: SERVER ───────────── -->
+  <text x="40" y="195" class="tier">Server</text>
+
+  <rect x="200" y="168" width="480" height="68" rx="8" class="box"/>
+  <text x="440" y="192" text-anchor="middle" class="label">FastAPI Server (port 8001)</text>
+  <text x="440" y="212" text-anchor="middle" class="sub">routes · SSE stream · asyncio.Queue · background worker thread</text>
+  <text x="440" y="228" text-anchor="middle" class="sub">approval API (POST /run/{id}/action/{idx}/{decision})</text>
+
+  <!-- arrow down: server spawns loop -->
+  <path d="M440,236 L440,270" class="arrow" marker-end="url(#ah)"/>
+  <text x="450" y="258" class="sub">spawns worker</text>
+
+  <!-- ───────────── TIER 3: AGENT LOOP ───────────── -->
+  <text x="40" y="297" class="tier">Agent loop</text>
+
+  <rect x="200" y="270" width="280" height="68" rx="8" class="box"/>
+  <text x="340" y="294" text-anchor="middle" class="label">Nemotron ReAct Loop</text>
+  <text x="340" y="312" text-anchor="middle" class="sub">messages ↔ tool_calls · max_steps = 12</text>
+  <text x="340" y="328" text-anchor="middle" class="sub">emits TraceEvents via on_event(...)</text>
+
+  <rect x="540" y="270" width="220" height="68" rx="8" class="ext"/>
+  <text x="650" y="294" text-anchor="middle" class="label">NVIDIA Hosted API</text>
+  <text x="650" y="312" text-anchor="middle" class="sub">nemotron-nano-9b-v2</text>
+  <text x="650" y="328" text-anchor="middle" class="sub">reasoning_content + tool_calls</text>
+
+  <!-- bidirectional arrow between loop and API -->
+  <path d="M480,298 L540,298" class="arrow-bi" marker-end="url(#ahb)"/>
+  <path d="M540,312 L480,312" class="arrow-bi" marker-end="url(#ahb)"/>
+  <text x="510" y="290" text-anchor="middle" class="sub">HTTPS · OpenAI-format</text>
+
+  <!-- arrow down: loop dispatches to registry -->
+  <path d="M340,338 L340,372" class="arrow" marker-end="url(#ah)"/>
+  <text x="350" y="360" class="sub">dispatch(name, args)</text>
+
+  <!-- Tool Registry -->
+  <rect x="200" y="372" width="280" height="46" rx="8" class="box"/>
+  <text x="340" y="394" text-anchor="middle" class="label">Tool Registry</text>
+  <text x="340" y="410" text-anchor="middle" class="sub">8 typed tools · JSON schemas</text>
+
+  <!-- arrows fanning down to 5 tools -->
+  <path d="M260,418 L 90,460" class="arrow" marker-end="url(#ah)"/>
+  <path d="M295,418 L235,460" class="arrow" marker-end="url(#ah)"/>
+  <path d="M340,418 L380,460" class="arrow" marker-end="url(#ah)"/>
+  <path d="M385,418 L525,460" class="arrow" marker-end="url(#ah)"/>
+  <path d="M420,418 L670,460" class="arrow" marker-end="url(#ah)"/>
+
+  <!-- ───────────── TIER 4: TOOL BACKENDS ───────────── -->
+  <text x="40" y="452" class="tier">Tool backends</text>
+
+  <!-- 5 tool boxes -->
+  <rect x="40" y="460" width="150" height="68" rx="8" class="box-soft"/>
+  <text x="115" y="484" text-anchor="middle" class="label">Metrics</text>
+  <text x="115" y="500" text-anchor="middle" class="sub">query_prometheus</text>
+  <text x="115" y="516" text-anchor="middle" class="sub">_instant / _range</text>
+
+  <rect x="200" y="460" width="150" height="68" rx="8" class="box-soft"/>
+  <text x="275" y="484" text-anchor="middle" class="label">Kubernetes API</text>
+  <text x="275" y="500" text-anchor="middle" class="sub">list_nodes · list_pods</text>
+  <text x="275" y="516" text-anchor="middle" class="sub">describe_node</text>
+
+  <rect x="360" y="460" width="150" height="68" rx="8" class="box-soft"/>
+  <text x="435" y="484" text-anchor="middle" class="label">Anomaly</text>
+  <text x="435" y="500" text-anchor="middle" class="sub">detect_anomalies</text>
+  <text x="435" y="516" text-anchor="middle" class="sub">z-score</text>
+
+  <!-- propose_action (SAFETY) -->
+  <rect x="520" y="460" width="150" height="68" rx="8" class="safety"/>
+  <text x="595" y="482" text-anchor="middle" class="label">propose_action</text>
+  <text x="595" y="500" text-anchor="middle" class="safety-t">QUEUES ONLY</text>
+  <text x="595" y="516" text-anchor="middle" class="sub">never executes</text>
+
+  <rect x="680" y="460" width="160" height="68" rx="8" class="box-soft"/>
+  <text x="760" y="484" text-anchor="middle" class="label">finish</text>
+  <text x="760" y="500" text-anchor="middle" class="sub">structured report</text>
+  <text x="760" y="516" text-anchor="middle" class="sub">terminate loop</text>
+
+  <!-- propose_action sends to approval queue (returns to client) -->
+  <path d="M595,460 C 595,430 760,170 670,140" class="arrow-d" marker-end="url(#ah)"/>
+  <text x="760" y="320" class="sub" font-style="italic">queued → operator</text>
+
+  <!-- arrows down from Metrics & K8s to externals -->
+  <path d="M115,528 L115,560" class="arrow" marker-end="url(#ah)"/>
+  <path d="M275,528 L275,560" class="arrow" marker-end="url(#ah)"/>
+
+  <!-- ───────────── TIER 5: EXTERNAL ───────────── -->
+  <text x="40" y="592" class="tier">External</text>
+
+  <rect x="40" y="560" width="150" height="48" rx="8" class="ext"/>
+  <text x="115" y="582" text-anchor="middle" class="label">Prometheus</text>
+  <text x="115" y="598" text-anchor="middle" class="sub">DCGM metrics</text>
+
+  <rect x="200" y="560" width="150" height="48" rx="8" class="ext"/>
+  <text x="275" y="582" text-anchor="middle" class="label">Kubernetes API</text>
+  <text x="275" y="598" text-anchor="middle" class="sub">read-only RBAC</text>
+
+  <!-- Legend -->
+  <g transform="translate(40, 660)">
+    <text x="0" y="0" class="tier">Legend</text>
+
+    <rect x="0" y="14" width="22" height="14" rx="3" class="box"/>
+    <text x="30" y="25" class="legend-t">in-process component</text>
+
+    <rect x="180" y="14" width="22" height="14" rx="3" class="ext"/>
+    <text x="210" y="25" class="legend-t">external service</text>
+
+    <rect x="340" y="14" width="22" height="14" rx="3" class="safety"/>
+    <text x="370" y="25" class="legend-t">safety boundary</text>
+
+    <line x1="500" y1="21" x2="540" y2="21" class="arrow-bi" marker-end="url(#ahb)"/>
+    <text x="548" y="25" class="legend-t">model ↔ loop traffic</text>
+
+    <line x1="700" y1="21" x2="740" y2="21" class="arrow-d"/>
+    <text x="748" y="25" class="legend-t">async / human-gated</text>
+  </g>
+</svg>

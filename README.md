@@ -1,127 +1,289 @@
 # K8s Nemotron Advisor
 
-An agentic system that uses NVIDIA Llama-3.3-Nemotron-Super-49B as the orchestrating / lead agent to monitor, analyze, and manage Kubernetes clusters autonomously. The model is deployed as an NVIDIA NIM microservice on Kubernetes.
+An agentic Kubernetes cluster advisor for GPU training fleets, powered by
+NVIDIA's [Nemotron Nano 9B v2](https://build.nvidia.com/nvidia/nvidia-nemotron-nano-9b-v2)
+reasoning model. The model investigates the cluster via a tool-use loop — it
+chooses which Prometheus queries to run, which nodes to describe, and which
+remediation to propose. A human operator approves or rejects each proposal
+before anything would be applied.
+
+The model never has direct write access to the cluster. Every mutation goes
+through a typed approval queue.
+
+---
+
+## Demo (no cluster required)
+
+```bash
+# 1. install
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+
+# 2. set your NVIDIA API key
+cp .env.example .env   # then edit and paste your key
+# or: export NVIDIA_API_KEY=nvapi-...
+
+# 3a. CLI — streams a colorized trace to the terminal
+.venv/bin/python main.py --mock --auto-approve
+
+# 3b. UI — open http://127.0.0.1:8001 in a browser
+.venv/bin/python -m ui.server
+```
+
+`--mock` swaps the real Prometheus / Kubernetes backends for an in-process
+fake cluster with one intentionally degraded node (`gpu-3`: thermal
+throttling, elevated power draw, pod restarts). The agent should locate it
+and propose a cordon.
+
+A typical run takes 5–7 model turns over ~30 seconds.
+
+---
 
 ## Architecture
 
-The system follows a multi-agent architecture where specialized agents handle distinct responsibilities, coordinated by a central Nemotron-powered orchestrator.
+![System architecture](docs/architecture.svg)
 
+Three layers, separated so each can change independently:
+
+| Layer | What it is | Where |
+|-------|------------|-------|
+| **Model + Loop** | OpenAI-compatible chat loop with `tool_calls`. Stops on `finish` tool, no-tool-calls response, or `max_steps`. Emits `TraceEvent`s through an `on_event` callback. | [`orchestrator/nemotron.py`](orchestrator/nemotron.py) |
+| **Tools** | Typed registry of what the model is allowed to do. JSON schemas the model sees, Python callables the loop dispatches to. The `propose_action` and `finish` tools are special — they queue or terminate, not act. | [`agents/tools.py`](agents/tools.py) |
+| **Backends** | The "agents" that actually talk to Prometheus / Kubernetes / numpy. Each tool routes to a backend method. Mock variants ([`agents/mock_backends.py`](agents/mock_backends.py)) implement the same surface for laptop demos. | [`agents/`](agents/) |
+
+Surfaces on top of the loop:
+
+| Surface | What it does | Where |
+|---------|--------------|-------|
+| **CLI** | Runs one investigation, streams a colored trace, walks the operator through approvals. | [`main.py`](main.py) |
+| **Web UI** | FastAPI + Server-Sent Events. Page renders trace, action cards, and final report live. Approvals are POSTed back. | [`ui/server.py`](ui/server.py), [`ui/static/index.html`](ui/static/index.html) |
+| **K8s deployment** | NIM manifests (self-hosted model) + CronJob that runs the CLI on a schedule with RBAC for read-only cluster access. | [`nim/`](nim), [`k8s/`](k8s) |
+
+### Component diagram
+
+```mermaid
+flowchart LR
+    subgraph Client["Client"]
+        UI["index.html<br/>SSE + Approval UI"]
+        CLI["main.py<br/>terminal trace"]
+    end
+
+    subgraph Server["FastAPI Server :8001"]
+        Routes["GET /<br/>POST /run<br/>GET /run/{id}/stream<br/>POST /run/{id}/action/{idx}/{decision}"]
+        Worker["Worker Thread"]
+        Q["asyncio.Queue<br/>trace events"]
+    end
+
+    subgraph Loop["Agent Loop"]
+        Brain["orchestrator/nemotron.py<br/>messages ↔ tool_calls<br/>max_steps=12"]
+        Reg["agents/tools.py<br/>ToolRegistry"]
+    end
+
+    subgraph Tools["Tool Backends"]
+        Met["MetricsAgent<br/>query_prometheus_instant<br/>query_prometheus_range"]
+        K8s["K8sAPIAgent<br/>list_nodes / list_pods<br/>describe_node"]
+        Anom["AnomalyDetector<br/>detect_anomalies (z-score)"]
+        Prop["propose_action<br/>QUEUES only"]
+        Fin["finish<br/>structured report"]
+    end
+
+    subgraph External["External"]
+        NV[("NVIDIA Hosted API<br/>integrate.api.nvidia.com<br/>nemotron-nano-9b-v2")]
+        Prom[("Prometheus")]
+        Kapi[("Kubernetes API")]
+    end
+
+    UI -->|EventSource SSE| Routes
+    UI -->|fetch POST| Routes
+    CLI -->|in-process| Brain
+    Routes -->|spawns| Worker
+    Worker -->|on_event| Q
+    Q -->|drain| Routes
+    Worker -->|brain.run| Brain
+    Brain -->|chat.completions| NV
+    Brain -->|dispatch name,args| Reg
+    Reg --> Met
+    Reg --> K8s
+    Reg --> Anom
+    Reg --> Prop
+    Reg --> Fin
+    Met -.->|HTTP| Prom
+    K8s -.->|kube client| Kapi
 ```
-k8s-nemotron-advisor/
-├── agents/
-│   ├── __init__.py
-│   ├── metrics_agent.py      # Prometheus/Telemetry (The Sensors)
-│   ├── k8s_api_agent.py      # K8s interactions (The Actuators)
-│   └── anomaly_agent.py      # Statistical analysis (The Verification)
-├── orchestrator/
-│   ├── __init__.py
-│   └── nemotron.py           # Nemotron NIM Logic (The Lead Agent)
-├── nim/                      # NIM microservice deployment manifests
-│   ├── namespace.yaml
-│   ├── secret.yaml
-│   ├── pvc.yaml
-│   ├── deployment.yaml
-│   └── service.yaml
-├── k8s/                      # Advisor deployment manifests
-│   ├── rbac.yaml
-│   └── cronjob.yaml
-├── Dockerfile
-├── .env                      # API Keys (local dev only)
-├── requirements.txt
-└── main.py
+
+### Loop sequence (one investigation)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant U as User (Browser)
+    participant S as FastAPI Server
+    participant L as Nemotron Loop
+    participant M as Model (NVIDIA API)
+    participant T as Tool Registry
+
+    U->>S: POST /run?mock=true
+    S->>L: spawn worker thread
+    S-->>U: { run_id }
+    U->>S: GET /run/{id}/stream (SSE open)
+
+    loop until finish or max_steps
+        L->>M: chat.completions(messages, tools)
+        M-->>L: reasoning_content + tool_calls
+        L->>S: emit reasoning event
+        L->>T: dispatch(name, args)
+        T-->>L: result (string)
+        L->>S: emit tool_call + tool_result events
+        S-->>U: SSE data: events
+    end
+
+    L->>S: emit final event<br/>(report, queued actions)
+    S-->>U: SSE data: final, then close
+    U->>S: POST /run/{id}/action/0/approved
+    S-->>U: { ok, decision, action }
 ```
 
-## Agents
+### The tool surface
 
-### Metrics Agent (The Sensors)
-Connects to Prometheus and other telemetry sources to collect cluster metrics such as GPU power consumption, GPU utilization, and error rates.
+The model sees these eight tools. The first six are read-only; the last two
+control loop termination.
 
-### K8s API Agent (The Actuators)
-Interfaces with the Kubernetes API to query cluster state — node resources, GPU capacity, and pod information.
+| Tool | Purpose |
+|------|---------|
+| `query_prometheus_instant` | One-off PromQL — model writes the query |
+| `query_prometheus_range` | Timeseries PromQL — for trends and anomaly detection |
+| `list_nodes` | Cluster nodes with ready state, GPU count, labels |
+| `list_pods` | Pods filtered by namespace / label selector |
+| `describe_node` | Conditions + recent events for one node |
+| `detect_anomalies` | z-score over a numeric series, configurable threshold |
+| `propose_action` | **Queues** a remediation (cordon / drain / delete pod / scale / page). Never executes. |
+| `finish` | Terminates the loop with `{assessment, risk_level, confidence}` |
 
-### Anomaly Agent (The Verification)
-Performs statistical analysis (z-score based) on collected metrics to detect anomalies and deviations from expected behavior.
+### Safety model
 
-## Orchestrator
+1. **Read-only loop.** The agent's investigation tools query Prometheus and
+   the Kubernetes API — no mutations. The K8s ServiceAccount that the
+   CronJob mounts has `get/list` on `nodes` and `pods`, nothing else.
+2. **Proposals, not actions.** `propose_action` appends to an in-process
+   queue and returns `"PROPOSED — awaiting human approval"`. The model is
+   prompted explicitly that it cannot execute.
+3. **Operator gate.** The CLI prompts `[y/N]` for each proposal; the UI
+   renders each as an Approve/Reject card. Decisions are recorded; nothing
+   is dispatched.
+4. **Execution layer is intentionally not wired in this version.** See
+   `Option D — real kubectl` below for the design.
 
-### Nemotron (The Lead Agent)
-Uses NVIDIA Llama-3.3-Nemotron-Super-49B (deployed as a NIM microservice) to reason over agent outputs, assess cluster health, and recommend actions. Communicates via OpenAI-compatible API.
-
-## Requirements
-
-### Infrastructure
-- Kubernetes cluster with NVIDIA GPU Operator installed
-- At least 1x NVIDIA H100-80GB or A100-80GB GPU node (for NIM deployment)
-- NVIDIA device plugin for Kubernetes
-- Prometheus deployed in the cluster (for metrics collection)
-
-### Credentials
-- **NGC API Key** — for pulling the NIM container image from `nvcr.io`
-- **NVIDIA API Key** — (optional) only needed if using NVIDIA hosted API instead of self-hosted NIM
-
-### Python Dependencies
-- `requests`
-- `numpy`
-- `kubernetes`
-- `python-dotenv`
+---
 
 ## Setup
 
-### 1. Deploy the NIM Microservice
+### Requirements
+
+- Python 3.11+
+- An NVIDIA API key from [build.nvidia.com](https://build.nvidia.com)
+  (free tier works for the Nano model)
+- Optional: a Kubernetes cluster with Prometheus + DCGM exporter, if you
+  want to run against real metrics instead of `--mock`
+
+### Install
 
 ```bash
-# Create namespace
-kubectl apply -f nim/namespace.yaml
-
-# Create NGC pull secret
-kubectl create secret docker-registry ngc-secret \
-  --docker-server=nvcr.io \
-  --docker-username='$oauthtoken' \
-  --docker-password=<NGC_API_KEY> \
-  -n nim
-
-# Create NGC API key secret
-kubectl create secret generic ngc-api-key \
-  --from-literal=NGC_API_KEY=<NGC_API_KEY> \
-  -n nim
-
-# Deploy NIM
-kubectl apply -f nim/pvc.yaml
-kubectl apply -f nim/deployment.yaml
-kubectl apply -f nim/service.yaml
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
 ```
 
-### 2. Deploy the Advisor Agent
+### Configure
+
+Create `.env` in the project root:
 
 ```bash
-# Create namespace
-kubectl create namespace monitoring
-
-# Create NVIDIA API key secret (optional, only if using hosted API)
-kubectl create secret generic nemotron-secrets \
-  --from-literal=NVIDIA_API_KEY=<your-key> \
-  -n monitoring
-
-# Deploy RBAC and CronJob
-kubectl apply -f k8s/rbac.yaml
-kubectl apply -f k8s/cronjob.yaml
+NVIDIA_API_KEY=nvapi-...
+NEMOTRON_BASE_URL=https://integrate.api.nvidia.com/v1
+NEMOTRON_MODEL=nvidia/nvidia-nemotron-nano-9b-v2
 ```
 
-### 3. Local Development
+To swap to a self-hosted NIM, change `NEMOTRON_BASE_URL` to your NIM service
+URL (the model speaks OpenAI-format on `/v1/chat/completions`) and
+`NEMOTRON_MODEL` to e.g. `nvidia/llama-3.3-nemotron-super-49b-v1.5`. No code
+changes.
+
+### Run
 
 ```bash
-git clone https://github.com/kevalshah90/nemotron-agentic.git
-cd nemotron-agentic
-pip install -r requirements.txt
+# CLI, mock cluster (recommended first run)
+.venv/bin/python main.py --mock
 
-python main.py \
-  --prometheus-url http://localhost:9090 \
-  --nim-url http://localhost:8000
+# CLI, mock cluster, no approval prompts (for screencasts)
+.venv/bin/python main.py --mock --auto-approve
+
+# CLI, real cluster
+.venv/bin/python main.py --prometheus-url http://prometheus.monitoring.svc:9090
+
+# Web UI
+.venv/bin/python -m ui.server   # http://127.0.0.1:8001
 ```
 
-## How It Works
+---
 
-1. **Metrics Agent** polls Prometheus for current cluster telemetry (GPU power, utilization).
-2. **Anomaly Agent** runs z-score analysis to flag statistically significant deviations.
-3. **Nemotron orchestrator** receives all data, assesses cluster health, and recommends actions.
-4. The cycle repeats every 5 minutes (configured via CronJob).
+## In-cluster deployment
+
+The original deployment story (NIM as a NIM microservice + CronJob advisor)
+still works; see [`nim/`](nim) and [`k8s/`](k8s). Swap the env in
+[`k8s/cronjob.yaml`](k8s/cronjob.yaml) to point `NEMOTRON_BASE_URL` at your
+NIM service URL.
+
+---
+
+## Project layout
+
+```
+nemotron/
+├── agents/
+│   ├── tools.py             # tool registry + JSON schemas
+│   ├── metrics_agent.py     # Prometheus backend
+│   ├── k8s_api_agent.py     # Kubernetes API backend (read-only)
+│   ├── anomaly_agent.py     # z-score
+│   ├── mock_backends.py     # in-process fake cluster for demos
+│   └── __init__.py
+├── orchestrator/
+│   ├── nemotron.py          # ReAct loop, NVIDIA hosted API client
+│   ├── prompts.py           # shared system + user prompts
+│   └── __init__.py
+├── ui/
+│   ├── server.py            # FastAPI + SSE
+│   ├── static/index.html    # vanilla-JS dark UI
+│   └── __init__.py
+├── nim/                     # NIM microservice manifests (self-hosted model)
+├── k8s/                     # advisor RBAC + CronJob
+├── main.py                  # CLI entry
+├── requirements.txt
+├── Dockerfile
+└── .env                     # NVIDIA_API_KEY etc. (gitignored)
+```
+
+---
+
+## Roadmap — Option D: real `kubectl` behind the approval gate
+
+The current version stops at "operator approved" — it records the decision
+but doesn't execute. The next step:
+
+- New `agents/executor.py` with one whitelisted method per `action_type`
+  (no generic `kubectl apply YAML`). Hard line of safety.
+- Two-stage UI button: **Approve** → server-side dry-run → preview diff →
+  **Apply** triggers real call. Two clicks per destructive action.
+- Separate `ServiceAccount` for the executor pod, bound to a `ClusterRole`
+  with only the verbs each whitelisted action requires (`patch nodes`,
+  `create pods/eviction`, `delete pods`, `patch deployments/scale`). The
+  investigator SA stays read-only.
+- Audit log per attempt: `{ts, run_id, proposal, decision, dry_run_diff,
+  applied, result}` to a ConfigMap or S3.
+- Blast-radius rails: rate-limit cordons, reject drain that would leave
+  fewer than `M` ready nodes, never touch nodes labeled
+  `nemotron.io/protected=true`. The model cannot override; the operator can
+  with an explicit flag that is also audit-logged.
+
+---
+
+## License
+
+[MIT](LICENSE)

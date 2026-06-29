@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nemotron Cluster Advisor</title>
+  <style>
+    :root {
+      --bg: #0d1117; --panel: #161b22; --border: #30363d; --line: #21262d;
+      --fg: #e6edf3; --grey: #7d8590; --cyan: #79c0ff; --yel: #d29922;
+      --grn: #3fb950; --red: #f85149; --btn-grn: #238636; --btn-grey: #21262d;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px; background: var(--bg); color: var(--fg);
+      font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+    header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+    h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: 0.2px; }
+    h1 .sub { color: var(--grey); font-weight: 400; margin-left: 8px; }
+    .controls { display: flex; gap: 12px; align-items: center; }
+    .controls label { color: var(--grey); }
+    button {
+      background: var(--btn-grn); color: white; border: 0; padding: 7px 14px;
+      border-radius: 6px; cursor: pointer; font: inherit; font-size: 13px;
+    }
+    button:hover { filter: brightness(1.1); }
+    button.reject { background: var(--btn-grey); color: var(--fg); border: 1px solid var(--border); }
+    button:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+
+    .grid { display: grid; grid-template-columns: 1.6fr 1fr; gap: 20px; }
+    @media (max-width: 900px) { .grid { grid-template-columns: 1fr; } }
+
+    .panel { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); padding: 14px 16px; }
+    .panel h2 { font-size: 13px; font-weight: 600; margin: 0 0 10px; color: var(--grey); text-transform: uppercase; letter-spacing: 0.6px; }
+    .panel + .panel { margin-top: 16px; }
+
+    #trace { max-height: 70vh; overflow-y: auto; }
+    .ev { padding: 4px 0; border-bottom: 1px solid var(--line); word-break: break-word; white-space: pre-wrap; }
+    .ev:last-child { border-bottom: none; }
+    .ev .step { color: var(--grey); }
+    .ev.tool_call { color: var(--cyan); }
+    .ev.tool_call b { color: #a5d6ff; }
+    .ev.tool_result { color: var(--grey); padding-left: 24px; font-size: 12.5px; }
+    .ev.model_text { color: var(--fg); font-style: italic; }
+    .ev.reasoning { color: var(--grey); font-style: italic; font-size: 12.5px; padding-left: 4px; border-left: 2px solid var(--border); margin-left: 4px; }
+    .ev.reasoning .label { color: #a371f7; font-style: normal; font-weight: 500; }
+    .ev.stop { color: var(--yel); }
+    .ev.final { color: var(--grn); font-weight: 600; }
+    .ev.error { color: var(--red); }
+
+    .action { padding: 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 10px; }
+    .action h3 { margin: 0 0 4px; font-size: 13px; font-weight: 600; display: flex; justify-content: space-between; align-items: center; }
+    .action .meta { color: var(--grey); font-size: 12px; margin-bottom: 6px; }
+    .action .reason { margin-bottom: 10px; }
+    .action .btns { display: flex; gap: 8px; }
+    .pill { display: inline-block; padding: 2px 8px; font-size: 11px; border-radius: 10px; background: #30363d; color: var(--grey); font-weight: 500; }
+    .pill.approved { background: #1f6e3a; color: #e6edf3; }
+    .pill.rejected { background: #5a1818; color: #e6edf3; }
+
+    #report .row { display: flex; gap: 16px; margin-bottom: 4px; }
+    #report .row b { color: var(--grey); font-weight: 500; min-width: 90px; }
+
+    .empty { color: var(--grey); font-style: italic; padding: 8px 0; }
+    .badge { display: inline-block; padding: 2px 6px; border-radius: 4px; background: var(--panel); border: 1px solid var(--border); font-size: 11px; color: var(--grey); margin-left: 6px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Nemotron Cluster Advisor <span class="sub">— agentic loop with human-in-the-loop approval</span></h1>
+    <div class="controls">
+      <label><input type="checkbox" id="mock" checked> mock cluster</label>
+      <span id="status" class="badge">idle</span>
+      <button id="start">Start Investigation</button>
+    </div>
+  </header>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Agent Trace</h2>
+      <div id="trace"><div class="empty">No run yet. Click "Start Investigation".</div></div>
+    </div>
+    <div>
+      <div class="panel">
+        <h2>Proposed Actions</h2>
+        <div id="actions"><div class="empty">— none yet —</div></div>
+      </div>
+      <div class="panel">
+        <h2>Final Report</h2>
+        <div id="report"><div class="empty">— pending —</div></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    const traceEl = $("trace"), actionsEl = $("actions"), reportEl = $("report"), statusEl = $("status");
+    let currentRun = null;
+    let actionIdx = 0;
+
+    const escape = (s) => String(s).replace(/[<>&]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;'}[c]));
+    const truncate = (s, n = 300) => { s = String(s); return s.length > n ? s.slice(0, n) + ` … +${s.length - n} chars` : s; };
+
+    function append(kind, html) {
+      const div = document.createElement("div");
+      div.className = "ev " + kind;
+      div.innerHTML = html;
+      traceEl.appendChild(div);
+      traceEl.scrollTop = traceEl.scrollHeight;
+    }
+
+    function setStatus(label, color) {
+      statusEl.textContent = label;
+      statusEl.style.color = color || "var(--grey)";
+    }
+
+    $("start").onclick = async () => {
+      traceEl.innerHTML = "";
+      actionsEl.innerHTML = `<div class="empty">— none yet —</div>`;
+      reportEl.innerHTML = `<div class="empty">— running —</div>`;
+      actionIdx = 0;
+      setStatus("starting…", "var(--yel)");
+      $("start").disabled = true;
+
+      const mock = $("mock").checked;
+      const r = await fetch(`/run?mock=${mock}`, { method: "POST" });
+      if (!r.ok) { setStatus("failed to start", "var(--red)"); $("start").disabled = false; return; }
+      const { run_id } = await r.json();
+      currentRun = run_id;
+      setStatus(`running · ${run_id}`, "var(--cyan)");
+
+      const es = new EventSource(`/run/${run_id}/stream`);
+      es.onmessage = (msg) => {
+        const ev = JSON.parse(msg.data);
+        renderEvent(ev);
+        if (ev.kind === "final") { es.close(); setStatus("done", "var(--grn)"); $("start").disabled = false; }
+      };
+      es.onerror = () => { es.close(); setStatus("stream closed", "var(--red)"); $("start").disabled = false; };
+    };
+
+    function renderEvent(ev) {
+      const p = ev.payload;
+      if (ev.kind === "reasoning") {
+        append("reasoning", `<span class="label">[step ${p.step}] ▸ thinking</span> ${escape(truncate(p.text, 600))}`);
+      } else if (ev.kind === "model_text") {
+        append("model_text", `<span class="step">[step ${p.step}] model:</span> ${escape(p.text)}`);
+      } else if (ev.kind === "tool_call") {
+        let prettyArgs = p.arguments;
+        try { prettyArgs = JSON.stringify(JSON.parse(p.arguments), null, 0); } catch (e) {}
+        append("tool_call", `<span class="step">[step ${p.step}]</span> → call <b>${escape(p.name)}</b>(${escape(truncate(prettyArgs, 220))})`);
+        if (p.name === "propose_action") {
+          try { renderAction(JSON.parse(p.arguments)); } catch (e) {}
+        }
+      } else if (ev.kind === "tool_result") {
+        append("tool_result", `← ${escape(truncate(p.result))}`);
+      } else if (ev.kind === "stop") {
+        append("stop", `[stop] reason=${escape(p.reason)} step=${p.step}`);
+      } else if (ev.kind === "error") {
+        append("error", `[error] ${escape(p.message)}`);
+      } else if (ev.kind === "final") {
+        append("final", `[done]`);
+        if (p.report) {
+          reportEl.innerHTML = `
+            <div class="row"><b>assessment</b><span>${escape(p.report.assessment)}</span></div>
+            <div class="row"><b>risk</b><span>${escape(p.report.risk_level)}</span></div>
+            <div class="row"><b>confidence</b><span>${escape(p.report.confidence)}</span></div>
+            <div class="row"><b>steps used</b><span>${escape(p.steps)} / 12</span></div>
+            <div class="row"><b>stop reason</b><span>${escape(p.stop_reason)}</span></div>
+          `;
+        } else {
+          reportEl.innerHTML = `<div class="empty">${p.error ? escape(p.error) : "No final report (loop hit max_steps)"}</div>`;
+        }
+      }
+    }
+
+    function renderAction(args) {
+      const idx = actionIdx++;
+      if (idx === 0) actionsEl.innerHTML = "";
+      const div = document.createElement("div");
+      div.className = "action";
+      div.id = `action-${idx}`;
+      div.innerHTML = `
+        <h3>${escape(args.action_type)} <span class="pill" id="pill-${idx}">pending</span></h3>
+        <div class="meta">target: <code>${escape(args.target)}</code></div>
+        <div class="reason">${escape(args.reason)}</div>
+        <div class="btns">
+          <button onclick="decide(${idx},'approved')">Approve</button>
+          <button class="reject" onclick="decide(${idx},'rejected')">Reject</button>
+        </div>`;
+      actionsEl.appendChild(div);
+    }
+
+    async function decide(idx, decision) {
+      const r = await fetch(`/run/${currentRun}/action/${idx}/${decision}`, { method: "POST" });
+      if (!r.ok) return;
+      const pill = $(`pill-${idx}`);
+      pill.textContent = decision;
+      pill.className = `pill ${decision}`;
+      $(`action-${idx}`).querySelectorAll("button").forEach(b => b.disabled = true);
+    }
+  </script>
+</body>
+</html>

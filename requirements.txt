@@ -1,4 +1,7 @@
-requests
-numpy
-kubernetes
-python-dotenv
+requests>=2.31
+numpy>=1.26
+kubernetes>=29.0
+python-dotenv>=1.0
+openai>=1.51
+fastapi>=0.110
+uvicorn[standard]>=0.27
