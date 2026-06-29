@@ -55,8 +55,18 @@ class ToolRegistry:
         return name == "finish"
 
 
-def build_registry(metrics, k8s, anomaly) -> ToolRegistry:
-    """Wire the three backend agents into a tool registry the model can call."""
+def build_registry(metrics, k8s, anomaly, cua=None) -> ToolRegistry:
+    """Wire the backend agents into a tool registry the model can call.
+
+    `cua` is the optional Computer Use Agent backend used for evidence
+    enrichment (Grafana panel screenshots). If omitted, a stub-mode
+    CUAGrafanaBackend is constructed; it returns synthetic responses unless
+    GRAFANA_URL and ANTHROPIC_API_KEY are present in the environment."""
+    from .cua_backend import CUAGrafanaBackend
+
+    if cua is None:
+        cua = CUAGrafanaBackend()
+
     reg = ToolRegistry()
 
     reg.register(
@@ -181,6 +191,50 @@ def build_registry(metrics, k8s, anomaly) -> ToolRegistry:
             },
         },
         lambda values, threshold_std=2.0: anomaly.detect(values, threshold_std),
+    )
+
+    reg.register(
+        {
+            "type": "function",
+            "function": {
+                "name": "capture_grafana_panel",
+                "description": (
+                    "Evidence enrichment: capture a Grafana panel as visual evidence for a finding "
+                    "(driven by an Anthropic Computer Use sub-agent). Use this AFTER you've already "
+                    "located a suspect node/pod via PromQL, when a screenshot would meaningfully "
+                    "strengthen a propose_action — e.g. a thermal-throttle pattern, a NCCL stall, "
+                    "a clear regime change in a timeseries. Returns a panel_url and, when CUA is "
+                    "configured, a screenshot_path. If unconfigured, returns a stub response with "
+                    "the panel_url so a human can open it manually — the loop is unaffected."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "dashboard_uid": {
+                            "type": "string",
+                            "description": "Grafana dashboard UID (the slug after /d/ in the URL).",
+                        },
+                        "panel_id": {
+                            "type": "integer",
+                            "description": "Numeric panel ID within the dashboard.",
+                        },
+                        "what_to_look_for": {
+                            "type": "string",
+                            "description": "One sentence describing the visual pattern you expect, e.g. 'clock-bouncing on gpu-3 after 14:20 UTC'.",
+                        },
+                        "from_minutes_ago": {
+                            "type": "integer",
+                            "description": "Time window start, minutes before now. Default 30.",
+                            "default": 30,
+                        },
+                    },
+                    "required": ["dashboard_uid", "panel_id", "what_to_look_for"],
+                },
+            },
+        },
+        lambda dashboard_uid, panel_id, what_to_look_for, from_minutes_ago=30: cua.capture_panel(
+            dashboard_uid, panel_id, what_to_look_for, from_minutes_ago
+        ),
     )
 
     def _propose(

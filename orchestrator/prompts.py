@@ -19,6 +19,11 @@ SYSTEM_PROMPT = textwrap.dedent("""
     - When you find a suspect node or pod, dig deeper with describe_node and
       list_pods before proposing an action.
     - Every propose_action MUST cite the specific metrics or events that justify it.
+    - For findings where a chart is more convincing than a number (regime changes,
+      thermal throttling, NCCL stalls), call capture_grafana_panel once you've
+      located the suspect resource — the screenshot/panel_url attaches as visual
+      evidence to your proposal. Skip it for trivially obvious findings; it's an
+      extra round-trip.
     - You are READ-ONLY. Actions you propose are queued for human approval; you
       cannot execute them. Be specific about target resources.
     - When you have enough evidence and have proposed all needed actions
